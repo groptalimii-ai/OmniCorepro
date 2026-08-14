@@ -1,0 +1,175 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: enterpriseai
+  labels:
+    app: backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: backend
+  # إصلاح: لم يكن يوجد استراتيجية تحديث صريحة - القيمة الافتراضية لـ Kubernetes
+  # (RollingUpdate 25%/25%) معقولة عمومًا، لكن جُعلت صريحة هنا لضمان عدم توقف
+  # الخدمة بالكامل أثناء أي نشر (maxUnavailable: 0 يضمن بقاء كل النسخ الحالية
+  # تعمل حتى تصبح النسخة الجديدة جاهزة فعليًا حسب readinessProbe).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      # تشديد أمني على مستوى الـPod: يفرض أن تُرفَض الحاوية لو حاولت (بالخطأ أو
+      # بتعديل مستقبلي على Dockerfile) العمل كـroot، حتى لو كانت صورة مُعدَّلة -
+      # دفاع بعمق بخلاف الاعتماد فقط على USER enterpriseai داخل Dockerfile نفسه.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+      - name: backend
+        # إصلاح: كانت الصورة :latest - وسم غير حتمي يمنع تتبع أي نسخة فعليًا
+        # منشورة، ويمنع إعادة الرجوع (rollback) الموثوق لنسخة سابقة معروفة. استبدل
+        # placeholder أدناه بوسم ثابت حقيقي (git SHA أو رقم إصدار) في خط أنابيب
+        # CI/CD الفعلي (راجع .github/workflows/ci.yml) بدل الإبقاء على :latest.
+        image: enterpriseai/backend:__BUILD_TAG__
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8000
+        envFrom:
+        - configMapRef:
+            name: backend-config
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: url
+        # إصلاح حرج: ENCRYPTION_KEY وSECRET_KEY كانا غائبين تمامًا هنا سابقًا -
+        # فقط DATABASE_URL وJWT_SECRET كانا مُمرَّرين. بما أن core/config.py يرفض
+        # الإقلاع فورًا (منذ الجولة 11) عند ENVIRONMENT=production بأسرار افتراضية/
+        # قصيرة، كان أي pod يُنشَر بالنسخة السابقة من هذا الملف سيدخل crash-loop
+        # فوري ودائم (CrashLoopBackOff) - الحاوية تبدأ، تفشل عند استيراد core.config،
+        # فيعيد Kubernetes تشغيلها إلى ما لا نهاية بلا أي تقدّم.
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: jwt-secret
+        - name: ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: encryption-key
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: secret-key
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        # تشديد أمني على مستوى الحاوية (دفاع بعمق يتماشى مع USER enterpriseai في
+        # Dockerfile، حتى لو أُعيد بناء الصورة يومًا بإعدادات مختلفة بالخطأ)
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop: ["ALL"]
+        # إصلاح: startupProbe جديد - يمنح الحاوية وقتًا كافيًا للإقلاع الفعلي (تهيئة
+        # PBKDF2 عالي التكرار لمفتاح التشفير في SecurityManager، اتصال قاعدة
+        # البيانات/محاولات Kafka المتكررة) قبل أن تبدأ livenessProbe بعدّ الإخفاقات -
+        # بدونه، إقلاع أبطأ من المتوقع (حمل عالٍ على العقدة مثلاً) قد يجعل Kubernetes
+        # يقتل الحاوية أثناء إقلاعها الطبيعي وتدخل في حلقة إعادة تشغيل بلا داعٍ.
+        startupProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          failureThreshold: 30
+          periodSeconds: 2
+        # إصلاح: كانت livenessProbe/readinessProbe تستهدفان نفس /health الذي كان
+        # (قبل إصلاح main.py) يفحص قاعدة البيانات/Redis ويُرجع 200 دائمًا مهما كانت
+        # النتيجة - عطلان مجتمعان: (1) لا فائدة فعلية من الفحص أصلاً بما أنه لا
+        # يعكس أي فشل حقيقي، و(2) حتى بعد إصلاح main.py ليعكس الفشل فعليًا، اعتماد
+        # livenessProbe على قاعدة بيانات خارجية خطأ منفصل: انقطاع DB مؤقت كان سيجعل
+        # Kubernetes يقتل كل نسخ backend الصحية (livenessProbe فشل) بدل تركها تعمل
+        # وتسحبها فقط من التداول (readinessProbe). الآن: liveness خفيف بلا تبعيات
+        # خارجية (/health/live)، وreadiness يفحص التبعيات فعليًا (/health/ready).
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          initialDelaySeconds: 0
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: http
+          initialDelaySeconds: 0
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: enterpriseai
+spec:
+  selector:
+    app: backend
+  ports:
+  - name: http
+    port: 8000
+    targetPort: http
+  type: ClusterIP
+---
+# إصلاح: replicas: 3 ثابتة يدويًا بلا أي آلية تحجيم تلقائي فعلية رغم وجود موارد
+# محدَّدة (resources.requests) اللازمة لعمل HPA. أُضيف تحجيم أفقي تلقائي حسب حمل
+# CPU الفعلي بدل الاعتماد فقط على عدد نسخ ثابت مُقدَّر يدويًا.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend
+  namespace: enterpriseai
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+---
+# إصلاح: لا PodDisruptionBudget سابقًا - بلا هذا، عمليات صيانة العقد الطبيعية
+# (node drain عند ترقية عقدة مثلاً) قد تُخرِج أكثر من نسخة من backend من الخدمة
+# دفعة واحدة، حتى لو minReplicas=3 يوحي بتوفر عالٍ مقصود.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: backend
+  namespace: enterpriseai
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: backend
