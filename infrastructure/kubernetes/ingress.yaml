@@ -1,0 +1,44 @@
+# إصلاح فجوة نشر: لا طريقة سابقة للوصول الخارجي لأي من backend/frontend في
+# Kubernetes (كلاهما ClusterIP فقط، لا NodePort ولا LoadBalancer ولا Ingress).
+# هذا يفترض ingress-nginx وcert-manager مثبَّتين على الكلاستر (شائعان جدًا، لكن
+# غير مُثبَّتين تلقائيًا من هذا المستودع - ثبّتهما عبر Helm إن لم يكونا موجودين).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: enterpriseai
+  namespace: enterpriseai
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # الـAPI يخدم WebSocket فعليًا (/ws) - يحتاج مهلة أطول من الافتراضي (60 ثانية)
+    # حتى لا تُقطَع اتصالات WebSocket طويلة الأمد من طرف الـIngress نفسه.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+      - app.yourcompany.com
+      - api.yourcompany.com
+    secretName: enterpriseai-tls
+  rules:
+  - host: app.yourcompany.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend
+            port:
+              number: 3000
+  - host: api.yourcompany.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: backend
+            port:
+              number: 8000
