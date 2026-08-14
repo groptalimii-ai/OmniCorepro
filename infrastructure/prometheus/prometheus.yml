@@ -1,0 +1,34 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# إصلاح: كان هذا الملف يستهدف خدمات وهمية غير موجودة فعليًا في أي مكان بالمشروع -
+# financial-agent/inventory-agent/production-agent كحاويات مستقلة، بينما كل
+# الوكلاء الـ11 تعمل in-process داخل حاوية backend الواحدة عبر AIOrchestrator (لا
+# توجد حاويات/خدمات منفصلة بهذه الأسماء في docker-compose.full.yml أو Kubernetes
+# إطلاقًا - راجع backend/ai_engine/orchestrator.py). كما كان يستهدف منافذ قواعد
+# بيانات خام (postgres:5432, redis:6379) التي لا تتحدث بروتوكول Prometheus أصلاً -
+# سطرا الفشل هذان كانا سيظهران بحالة "DOWN" دائمًا في Prometheus بلا أي فائدة.
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # الهدف الوحيد الذي يُصدِّر مقاييس Prometheus فعليًا حاليًا - /metrics حقيقي
+  # مُضاف في backend/main.py (كان غائبًا تمامًا سابقًا رغم أن prometheus-client
+  # كانت مُدرَجة في requirements.txt بلا استخدام).
+  - job_name: 'backend'
+    static_configs:
+      - targets: ['backend:8000']
+    metrics_path: /metrics
+
+  # ملاحظات لإكمال المراقبة لاحقًا (تتطلب مكوّنات إضافية غير مُضمَّنة حاليًا في
+  # docker-compose.full.yml لتفادي تضخيم البنية التحتية بلا حاجة فعلية):
+  #
+  # - postgres: يتطلب تشغيل حاوية prometheus-community/postgres-exporter بجانب
+  #   postgres وربطها بـDATABASE_URL، ثم استهداف <postgres-exporter>:9187 هنا.
+  # - redis: يتطلب حاوية oliver006/redis_exporter بجانب redis، ثم استهداف
+  #   <redis-exporter>:9121 هنا.
+  # - frontend (nginx): يتطلب nginx-prometheus-exporter كـsidecar، أو تفعيل
+  #   stub_status في nginx.conf ثم exporter يقرأ منه. لا فائدة كبيرة من قياسه
+  #   مباشرة بما أنه ملفات ثابتة خلف nginx بلا منطق تطبيقي.
