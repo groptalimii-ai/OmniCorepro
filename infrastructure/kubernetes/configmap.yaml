@@ -1,0 +1,29 @@
+# إصلاح فجوة نشر حرجة: backend.yaml السابق كان يمرر DATABASE_URL وJWT_SECRET فقط
+# من الأسرار، ولا شيء غير ذلك - ENVIRONMENT، ENCRYPTION_KEY، SECRET_KEY، REDIS_URL،
+# ALLOWED_ORIGINS، ALLOWED_HOSTS كانت كلها غائبة تمامًا. بما أن core/config.py
+# (منذ الجولة 11) يرفض الإقلاع فورًا في ENVIRONMENT=production بأسرار افتراضية/قصيرة،
+# كان أي pod يُنشَر بهذا الملف كما هو سيدخل في crash-loop فوري ودائم - لا يوجد
+# ENCRYPTION_KEY/SECRET_KEY يعني القيم الافتراضية المكتوبة في الكود المصدري نفسه،
+# وENVIRONMENT غير المُعرَّفة تأخذ "production" افتراضيًا (نفس المشكلة بالضبط).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: enterpriseai
+data:
+  ENVIRONMENT: "production"
+  DEBUG: "false"
+  # مطلوب لكل نشر فعلي: نطاقات حقيقية لكل عميل، وليس القيم الافتراضية
+  # (localhost / "*") المخصصة للتطوير المحلي فقط - راجع core/config.py.
+  ALLOWED_ORIGINS: "https://app.yourcompany.com"
+  ALLOWED_HOSTS: "api.yourcompany.com"
+  REDIS_URL: "redis://redis:6379/0"
+  CLICKHOUSE_URL: "clickhouse://clickhouse:8123/enterpriseai"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  AI_MODEL_PATH: "/models"
+  AI_GPU_ENABLED: "false"
+  # يبقى false افتراضيًا: أسماء النماذج الحالية في كل وكيل (finbert-base وغيرها)
+  # ليست نماذج حقيقية منشورة على Hugging Face Hub بعد - راجع core/config.py.
+  MODEL_LOADING_ENABLED: "false"
+  PROMETHEUS_ENABLED: "true"
+  LOG_LEVEL: "INFO"
